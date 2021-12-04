@@ -19,7 +19,6 @@ from sklearn import mixture
 from matplotlib.patches import Ellipse
 from sklearn.metrics.cluster import completeness_score
 
-
 class GMVAE_DPGMM:
 
   def __init__(self, args):
@@ -117,7 +116,7 @@ class GMVAE_DPGMM:
     
     true_labels_list = []
     predicted_labels_list = []
-    out_net_list = []
+    features_list = []
 
     # iterate over the dataset
     for (data, labels) in data_loader:
@@ -131,6 +130,7 @@ class GMVAE_DPGMM:
       
       # forward call
       out_net = self.network(data, self.gumbel_temp, self.hard_gumbel) 
+      features = out_net['mean']
       unlab_loss_dic = self.unlabeled_loss(data, out_net) 
       total = unlab_loss_dic['total']
 
@@ -148,7 +148,7 @@ class GMVAE_DPGMM:
       predicted = unlab_loss_dic['predicted_labels']
       true_labels_list.append(labels)
       predicted_labels_list.append(predicted)   
-      out_net_list.append(out_net)   
+      features_list.append(features)
    
       num_batches += 1. 
 
@@ -161,12 +161,13 @@ class GMVAE_DPGMM:
     # concat all true and predicted labels
     true_labels = torch.cat(true_labels_list, dim=0).cpu().numpy()
     predicted_labels = torch.cat(predicted_labels_list, dim=0).cpu().numpy()
+    features_labels = torch.cat(features_list, dim=0).cpu().detach().numpy()
 
     # compute metrics
     accuracy = 100.0 * self.metrics.cluster_acc(predicted_labels, true_labels)
     nmi = 100.0 * self.metrics.nmi(predicted_labels, true_labels)
 
-    return total_loss, recon_loss, gauss_loss, cat_loss, accuracy, nmi, out_net_list, true_labels
+    return total_loss, recon_loss, gauss_loss, cat_loss, accuracy, nmi, features_labels, true_labels
 
 
   def test(self, data_loader, return_loss=False):
@@ -238,8 +239,8 @@ class GMVAE_DPGMM:
     else:
       return accuracy, nmi
 
-  def train_dpgmm(dpgmm, features, true_labels):
-    dpgmm = dpgmm.fit(features)
+  def train_dpgmm(self, dpgmm_in, features, true_labels):
+    dpgmm = dpgmm_in.fit(features)
     y_dpgmm = dpgmm.predict(features)
     acc = completeness_score(true_labels, y_dpgmm)
     nmi = normalized_mutual_info_score(true_labels, y_dpgmm)
@@ -259,18 +260,15 @@ class GMVAE_DPGMM:
         output: (dict) contains the history of train/val loss
     """
     optimizer = optim.Adam(self.network.parameters(), lr=self.learning_rate)
-    train_history_acc, val_history_acc, dpgmm_history_acc = [], [], []
-    train_history_nmi, val_history_nmi, dpgmm_history_nmi = [], [], []
+    train_history_acc, val_history_acc = [], []
+    train_history_nmi, val_history_nmi = [], []
 
     # train DPGMM from previous epoch
     dpgmm = mixture.BayesianGaussianMixture(n_components=10)
-
     for epoch in range(1, self.num_epochs + 1):
-      train_loss, train_rec, train_gauss, train_cat, train_acc, train_nmi, train_out_net, train_true_labels = self.train_epoch(optimizer, train_loader)
-      # train DPGMM from previous epoch
-      dpgmm, dpgmm_acc, dpgmm_nmi = self.train_dpgmm(dpgmm, train_out_net['mean'], train_true_labels)
-      val_loss, val_rec, val_gauss, val_cat, val_acc, val_nmi, _ = self.test(val_loader, True)
-
+      train_loss, train_rec, train_gauss, train_cat, train_acc, train_nmi, train_features, train_labels = self.train_epoch(optimizer, train_loader)
+      dpgmm, dpgmm_acc, dpgmm_nmi = self.train_dpgmm(dpgmm, train_features, train_labels)
+      val_loss, val_rec, val_gauss, val_cat, val_acc, val_nmi = self.test(val_loader, True)
 
       # if verbose then print specific information about training
       if self.verbose == 1:
@@ -293,12 +291,10 @@ class GMVAE_DPGMM:
 
       train_history_acc.append(train_acc)
       val_history_acc.append(val_acc)
-      dpgmm_history_acc.append(dpgmm_acc)
       train_history_nmi.append(train_nmi)
       val_history_nmi.append(val_nmi)
-      dpgmm_history_nmi.append(dpgmm_nmi)
-    return {'train_history_nmi' : train_history_nmi, 'val_history_nmi': val_history_nmi, 'dpgmm_history_nmi': dpgmm_history_nmi,
-            'train_history_acc': train_history_acc, 'val_history_acc': val_history_acc, 'dpgmm_history_acc': dpgmm_history_acc}
+    return {'train_history_nmi' : train_history_nmi, 'val_history_nmi': val_history_nmi,
+            'train_history_acc': train_history_acc, 'val_history_acc': val_history_acc}
   
 
   def latent_features(self, data_loader, return_labels=False):
