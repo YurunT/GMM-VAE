@@ -19,9 +19,12 @@ from sklearn import mixture
 from matplotlib.patches import Ellipse
 from sklearn.metrics.cluster import completeness_score
 
+import wandb
+
 class GMVAE_DPGMM:
 
   def __init__(self, args):
+    wandb.init(project='11785_Project')
     self.num_epochs = args.epochs
     self.cuda = args.cuda
     self.verbose = args.verbose
@@ -48,13 +51,16 @@ class GMVAE_DPGMM:
     self.decay_temp_rate = args.decay_temp_rate
     self.gumbel_temp = self.init_temp
 
-    self.network = GMVAENet(self.input_size, self.gaussian_size, self.num_classes)
+    self.dpgmm = mixture.BayesianGaussianMixture(n_components=10, covariance_type="diag")
+    self.network = GMVAE_DPGMMNet(self.input_size, self.gaussian_size, self.num_classes)
+#     checkpoint = torch.load('gmvae_model_latent_dim_10.pth')
+#     self.network.load_state_dict(checkpoint['model_state_dict'])
+#     print("Pretrained model loaded")
     self.losses = LossFunctions()
     self.metrics = Metrics()
 
     if self.cuda:
       self.network = self.network.cuda() 
-  
 
   def unlabeled_loss(self, data, out_net):
     """Method defining the loss functions derived from the variational lower bound
@@ -167,7 +173,7 @@ class GMVAE_DPGMM:
     accuracy = 100.0 * self.metrics.cluster_acc(predicted_labels, true_labels)
     nmi = 100.0 * self.metrics.nmi(predicted_labels, true_labels)
 
-    return total_loss, recon_loss, gauss_loss, cat_loss, accuracy, nmi, features_labels, true_labels
+    return total_loss, recon_loss, gauss_loss, cat_loss, accuracy, nmi
 
 
   def test(self, data_loader, return_loss=False):
@@ -238,7 +244,8 @@ class GMVAE_DPGMM:
       return total_loss, recon_loss, gauss_loss, cat_loss, accuracy, nmi
     else:
       return accuracy, nmi
-
+    
+    
   def train_dpgmm(self, dpgmm_in, features, true_labels):
     dpgmm = dpgmm_in.fit(features)
     y_dpgmm = dpgmm.predict(features)
@@ -264,12 +271,25 @@ class GMVAE_DPGMM:
     train_history_nmi, val_history_nmi = [], []
 
     # train DPGMM from previous epoch
-    dpgmm = mixture.BayesianGaussianMixture(n_components=10)
+    dpgmm = self.dpgmm
     for epoch in range(1, self.num_epochs + 1):
-      train_loss, train_rec, train_gauss, train_cat, train_acc, train_nmi, train_features, train_labels = self.train_epoch(optimizer, train_loader)
+      train_loss, train_rec, train_gauss, train_cat, train_acc, train_nmi = self.train_epoch(optimizer, train_loader)
+      train_features, train_labels = self.latent_features(train_loader, return_labels=True)
       dpgmm, dpgmm_acc, dpgmm_nmi = self.train_dpgmm(dpgmm, train_features, train_labels)
       val_loss, val_rec, val_gauss, val_cat, val_acc, val_nmi = self.test(val_loader, True)
-
+      # Update the mu and var weights after each epoch
+      self.network.update_mu_var_dpgmm(dpgmm)
+      
+      wandb.log({
+            "epoch": epoch, 
+            "train_acc": train_acc,
+            "train_loss": train_loss,
+            "train_nmi": train_nmi,
+            "val_acc": val_acc,
+            "val_loss": val_loss,
+            "val_nmi": val_nmi
+        })
+      
       # if verbose then print specific information about training
       if self.verbose == 1:
         print("(Epoch %d / %d)" % (epoch, self.num_epochs) )
